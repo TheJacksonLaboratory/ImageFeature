@@ -1,0 +1,112 @@
+%{
+# Classify Genotype based on Glomerular Features 
+->kidneys.AnalysisGroups
+-----
+train_images:longblob
+class_patch_ids:longblob
+actual_genotype:longblob
+predicted_genotype:longblob
+svm_scores:longblob
+roc_curve:longblob
+%}
+
+classdef TubularGenotypeSVM < dj.Imported
+
+	methods(Access=protected)
+
+		function makeTuples(self, key)
+            load prepath.mat large_storage_path
+            Prepath=large_storage_path;
+            sections=fetch(kidneys.TubularFeatures,'*');
+            patches=struct('mouse_id',{[]},'image_id',{[]},'patch_id',{[]},'genotype',{[]},...
+                'features',{[]});
+            pp=0;
+            for ii=1:length(patches)
+                sec_key=rmfeild(sections(ii),{'tub_features_path','patch_pos'});
+                genotype=fetch1(kidneys.Mice&sec_key,'genotype');
+                load([Prepath,sections(ii).tub_features_path],'tub_features')
+                for jj=1:size(sections(ii).centers,1)
+                    pp=pp+1;
+                    patches(pp).mouse_id=sections(ii).mouse_id;
+                    patches(pp).image_id=sections(ii).image_id;
+                    patches(pp).patch_id=sprintf('%s_i%04.f_j%04.f',...
+                        sections(ii).image_id,sections(ii).patch_pos(jj,1),...
+                        sections(ii).patch_pos(jj,2));
+                    patches(pp).genotype=genotype;
+                    patches(pp).features=tub_features(jj,:); %#ok<IDISVAR,NODEF>
+                end
+            end
+            KO_idx=strcmp({patches.genotype},'KO');
+            KO_features=vertcat(patches(KO_idx).features);
+            KO_image_ids={patches(KO_idx).image_id}';
+            KO_images=unique(KO_image_ids);
+            KO_patch_ids={patches(KO_idx).patch_id}';
+            Het_idx=strcmp({patches.genotype},'Het');
+            class_Het_features=vertcat(patches(Het_idx).features);
+            class_Het_ids={patches(Het_idx).patch_id}';
+            WT_idx=strcmp({patches.genotype},'WT');
+            WT_features=vertcat(patches(WT_idx).features);
+            WT_image_ids={patches(WT_idx).image_id}';
+            WT_images=unique(WT_image_ids);
+            WT_patch_ids={patches(WT_idx).patch_id}';
+            rng default;
+            training_KO_images=KO_images(randperm(length(KO_images),5));
+            training_WT_images=WT_images(randperm(length(WT_images),5));
+            training_KO_idx=cellfun(@(x) any(strcmp(x,training_KO_images),KO_image_ids));
+            training_WT_idx=cellfun(@(x) any(strcmp(x,training_WT_images),WT_image_ids));
+            training_KO_features=KO_features(training_KO_idx,:);
+            training_WT_features=WT_features(training_WT_idx,:);
+            svm_model=fitcsvm([training_KO_features;training_WT_features],[ones(5,1);zeros(5,1)],...
+                'Standardize', true, 'KernelFunction', 'polynomial',...
+                'PolynomialOrder',3,'KernelScale', 'auto','ClassNames',[1,0]);
+            class_KO_features=KO_features(~training_KO_idx);
+            class_KO_ids=KO_patch_ids(~training_KO_idx);
+            class_WT_features=WT_features(~training_WT_idx);
+            class_WT_ids=WT_patch_ids(~training_WT_idx);
+            KO_predicted=Cell(size(class_KO_ids));
+            KO_scores=zeros(size(class_KO_ids));
+            for ii=1:length(class_KO_ids)
+                [class,score]=predict(svm_model,class_KO_features(ii,:));
+                if class
+                    KO_predicted{ii}='KO';
+                else
+                    KO_predicted{ii}='WT';
+                end
+                KO_scores(ii)=score(1);
+            end
+            Het_predicted=Cell(size(class_Het_ids));
+            Het_scores=zeros(size(class_Het_ids));
+            for ii=1:length(class_Het_ids)
+                [class,score]=predict(svm_model,class_Het_features(ii,:));
+                if class
+                    Het_predicted{ii}='KO';
+                else
+                    Het_predicted{ii}='WT';
+                end
+                Het_scores(ii)=score(1);
+            end
+            WT_predicted=Cell(size(class_WT_ids));
+            WT_scores=zeros(size(class_WT_ids));
+            for ii=1:length(class_WT_ids)
+                [class,score]=predict(svm_model,class_WT_features(ii,:));
+                if class
+                    WT_predicted{ii}='KO';
+                else
+                    WT_predicted{ii}='WT';
+                end
+                WT_scores(ii)=score(1);
+            end
+            [roc_curve.X,roc_curve.Y,roc_curve.T,roc_curve.AUC,roc_curve.OPTROCPT]=...
+                perfcurve([ones(size(KO_scores));zeros(size(WT_scores))],...
+                [KO_scores;WT_scores],1);
+            key.train_images=[training_KO_images;training_WT_images];
+            key.class_patch_ids=[class_KO_ids;class_Het_ids;class_WT_ids];
+            key.actual_genotype=[repmat({'KO'},size(class_KO_ids));...
+                repmat({'Het'},size(class_Het_ids));repmat({'WT'},size(class_WT_ids))];
+            key.predicted_genotype=[KO_predicted;Het_predicted;WT_predicted];
+            key.svm_scores=[KO_scores;Het_scores;WT_scores];
+            key.roc_curve=roc_curve;
+			 self.insert(key)
+		end
+    end
+end
